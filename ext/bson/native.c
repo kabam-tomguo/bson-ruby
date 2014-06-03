@@ -25,6 +25,11 @@
 #include <unistd.h>
 #include <ruby.h>
 
+static ID i_to_s, i_to_json, i_new, i_indent, i_space, i_space_before,
+       i_object_nl, i_array_nl, i_max_nesting, i_allow_nan, i_ascii_only,
+          i_quirks_mode, i_pack, i_unpack, i_create_id, i_extend, i_key_p,
+         i_aref, i_send, i_respond_to_p, i_match, i_keys, i_depth,
+         i_buffer_initial_length, i_dup,i_to_bson;
 /**
  * For 64 byte systems we convert to longs, for 32 byte systems we convert
  * to a long long.
@@ -150,6 +155,8 @@ static char rb_bson_machine_id[HOST_NAME_MAX];
  * @since 2.0.0
  */
 static unsigned int rb_bson_object_id_counter = 0;
+static int generate_json(VALUE encoded,VALUE key, VALUE obj);
+static int rb_hash_to_bson_impl(VALUE encoded,VALUE self);
 
 /**
  * Take the provided params and return the encoded bytes or a default one.
@@ -457,6 +464,153 @@ static VALUE rb_integer_to_bson_int64(VALUE self, VALUE encoded)
   return int64_t_to_bson(NUM2INT64(self), encoded);
 }
 
+
+static VALUE rb_string_to_bson(int argc,VALUE* argv ,VALUE self)
+{
+
+    VALUE encoded = rb_get_default_encoded(argc, argv);
+
+    const int32_t v = RSTRING_LEN(self) + 1;
+
+    const char bytes[4] = {
+      v & 255,
+      (v >> 8) & 255,
+      (v >> 16) & 255,
+      (v >> 24) & 255
+    };
+
+    rb_str_cat(encoded, bytes, 4);
+    rb_str_cat(encoded, RSTRING_PTR(self), v - 1);
+    rb_str_cat(encoded, &rb_bson_null_byte, 1);
+
+
+
+
+    return encoded;
+}
+/**
+ * Convert hash to bson
+ * @since 2.0.0
+ */
+static VALUE rb_hash_to_bson(int argc, VALUE *argv, VALUE self)
+{
+   //rb_str_cat(encoded, &rb_bson_null_byte, 1);
+  VALUE encoded = rb_get_default_encoded(argc, argv);
+  
+  rb_hash_to_bson_impl(encoded,self);
+
+  return encoded;
+}
+
+static int rb_hash_to_bson_impl(VALUE encoded,VALUE self)
+{
+    VALUE key, key_to_s, keys;
+    int i;
+    keys = rb_funcall(self, i_keys, 0);
+    int size = 5;
+
+    rb_str_cat(encoded, &size,4 );
+
+    for(i = 0; i < RARRAY_LEN(keys); i++) {
+       key = rb_ary_entry(keys, i);
+       key_to_s = rb_funcall(key, i_to_s, 0);
+       Check_Type(key_to_s, T_STRING);
+       //generate value
+       size += generate_json(encoded, key_to_s,rb_hash_aref(self, key));
+
+    }
+    //update size
+   // printf("size if %d,encode size is %d\n",size, RSTRING_LEN (encoded));
+    memcpy(RSTRING_PTR(encoded) + RSTRING_LEN (encoded) - size + 1,  &size, 4);
+    rb_str_cat(encoded, &rb_bson_null_byte, 1);
+
+    return size;
+}
+
+
+static inline void rb_hash_key_to_bson(VALUE encoded,VALUE key,char type)
+{
+
+  rb_str_cat(encoded, &type,1 );
+  rb_str_cat(encoded, RSTRING_PTR(key),RSTRING_LEN(key));
+  rb_str_cat(encoded, &rb_bson_null_byte, 1);
+}
+
+static int  inline generate_json(VALUE encoded,VALUE key,VALUE obj)
+{
+    VALUE res;
+    VALUE tmp;
+    int size = 0;
+    VALUE klass = CLASS_OF(obj);
+    if (klass == rb_cHash) {
+      rb_hash_key_to_bson(encoded,key,0x03);
+      size = rb_hash_to_bson_impl(encoded,obj) ;
+    } else if (klass == rb_cArray) {
+      //  generate_json_array(buffer, Vstate, state, obj);
+       rb_hash_key_to_bson(encoded,key,0x04);
+
+       char c[2] = {'0',0};
+       int i;
+       for(i = 0; i < RARRAY_LEN(obj); i++) {
+
+         VALUE ele = rb_ary_entry(obj, i); 
+
+         VALUE ele_key = rb_str_new(&c,2);
+         size += generate_json(encoded, ele_key,ele);
+  
+
+         c[0]++;
+
+      }
+
+
+
+    } else if (klass == rb_cString) {
+        //VALUE str_to_bson = rb_funcall(obj, i_to_bson, 0);
+        rb_hash_key_to_bson(encoded,key,0x02);
+        res = rb_string_to_bson(0, NULL, obj);
+
+
+        size = RSTRING_LEN(res) ;
+        rb_str_cat(encoded, RSTRING_PTR(res),  size); // lenth + content + \x0 
+
+    } else if (obj == Qnil) {
+      rb_hash_key_to_bson(encoded,key,0x0a);
+    } else if (obj == Qfalse) {
+      rb_hash_key_to_bson(encoded,key,0x08);
+      size = 5;
+      rb_str_cat(encoded, &size,  4);
+      rb_str_cat(encoded, &rb_bson_null_byte, 1);
+    } else if (obj == Qtrue) {
+      rb_hash_key_to_bson(encoded,key,0x08);
+       size = 5;
+      rb_str_cat(encoded, &size,  4);
+
+      rb_str_cat(encoded, &rb_bson_true_byte,1);
+    } else if (klass == rb_cFixnum) {
+       rb_hash_key_to_bson(encoded,key,0x12);
+       size = 8;
+       rb_integer_to_bson_int64(obj,encoded);
+    } 
+    // else if (klass == rb_cBignum) {
+    //     generate_json_bignum(buffer, Vstate, state, obj);
+    // } 
+    else if (klass == rb_cFloat) {
+       rb_hash_key_to_bson(encoded,key,0x1);
+       size = 8;
+       VALUE ret = rb_float_to_bson(0, NULL, obj);
+
+       rb_str_cat(encoded, RSTRING_PTR(ret), 8);
+    } 
+
+    return size + 2 + RSTRING_LEN(key);
+    // else if (rb_respond_to(obj, i_to_bson)) {
+    //     tmp = rb_funcall(obj, i_to_bson, 0);
+    //     Check_Type(tmp, T_STRING);
+    //     rb_str_cat(encoded, &tmp, RSTRING_LEN(tmp));
+    // } 
+}
+
 /**
  * Converts the milliseconds time to the raw BSON bytes. We need to
  * explicitly convert using 64 bit here.
@@ -615,6 +769,10 @@ void Init_native()
   VALUE string = rb_const_get(bson, rb_intern("String"));
   VALUE true_class = rb_const_get(bson, rb_intern("TrueClass"));
   VALUE false_class = rb_const_get(bson, rb_intern("FalseClass"));
+
+  VALUE hash = rb_const_get(bson,rb_intern("Hash"));
+  VALUE hash_class = rb_const_get(hash, rb_intern("ClassMethods"));
+
   rb_bson_utf8_string = rb_const_get(bson, rb_intern("UTF8"));
   rb_utc_method = rb_intern("utc");
 
@@ -657,6 +815,9 @@ void Init_native()
   rb_define_method(time_class, "from_bson", rb_time_from_bson, 1);
 
   // String optimizations.
+  rb_undef_method(string, "to_bson");
+  rb_define_method(string, "to_bson", rb_string_to_bson, -1);
+
   rb_undef_method(string, "set_int32");
   rb_define_method(string, "set_int32", rb_string_set_int32, 2);
   rb_undef_method(string, "from_bson_string");
@@ -667,4 +828,15 @@ void Init_native()
   // Redefine the next method on the object id generator.
   rb_undef_method(generator, "next_object_id");
   rb_define_method(generator, "next_object_id", rb_object_id_generator_next, -1);
+
+  //Redefine hash
+  //rb_undef_method(hash, "to_bson");
+  rb_undef_method(hash, "to_bson");
+  rb_define_method(hash, "to_bson", rb_hash_to_bson, -1);
+
+  i_match = rb_intern("match");
+  i_keys = rb_intern("keys");
+  i_dup = rb_intern("dup");
+  i_to_s = rb_intern("to_s");
+  i_to_bson = rb_intern("to_bson");
 }
