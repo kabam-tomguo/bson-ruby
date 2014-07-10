@@ -518,9 +518,9 @@ static int rb_hash_to_bson_impl(VALUE encoded,VALUE self)
        //generate value
        size += generate_json(encoded, key_to_s,rb_hash_aref(self, key));
 
+      //printf("size if %d,encode size is %d\n",size, RSTRING_LEN (encoded));
     }
     //update size
-   // printf("size if %d,encode size is %d\n",size, RSTRING_LEN (encoded));
     memcpy(RSTRING_PTR(encoded) + RSTRING_LEN (encoded) - size + 1,  &size, 4);
     rb_str_cat(encoded, &rb_bson_null_byte, 1);
 
@@ -541,36 +541,39 @@ static int  inline generate_json(VALUE encoded,VALUE key,VALUE obj)
     VALUE res;
     VALUE tmp;
     int size = 0;
+    ID indiff_hash_id =  rb_intern("HashWithIndifferentAccess");
+    VALUE indiff_hash_klass = rb_const_get(rb_cObject,indiff_hash_id);
     VALUE klass = CLASS_OF(obj);
-    if (klass == rb_cHash) {
+    if (klass == rb_cHash || klass == indiff_hash_klass) {
       rb_hash_key_to_bson(encoded,key,0x03);
       size = rb_hash_to_bson_impl(encoded,obj) ;
     } else if (klass == rb_cArray) {
       //  generate_json_array(buffer, Vstate, state, obj);
        rb_hash_key_to_bson(encoded,key,0x04);
 
-       char c[2] = {'0',0};
+       char c[1] = {'0'};
        int i;
+       size = 5;
+
+       rb_str_cat(encoded, &size,4 );
        for(i = 0; i < RARRAY_LEN(obj); i++) {
 
          VALUE ele = rb_ary_entry(obj, i); 
 
-         VALUE ele_key = rb_str_new(&c,2);
+         VALUE ele_key = rb_str_new(&c,1);
          size += generate_json(encoded, ele_key,ele);
   
-
          c[0]++;
-
       }
 
+      memcpy(RSTRING_PTR(encoded) + RSTRING_LEN (encoded) - size +1,  &size, 4);
+      rb_str_cat(encoded, &rb_bson_null_byte, 1);
 
 
     } else if (klass == rb_cString) {
         //VALUE str_to_bson = rb_funcall(obj, i_to_bson, 0);
         rb_hash_key_to_bson(encoded,key,0x02);
         res = rb_string_to_bson(0, NULL, obj);
-
-
         size = RSTRING_LEN(res) ;
         rb_str_cat(encoded, RSTRING_PTR(res),  size); // lenth + content + \x0 
 
@@ -578,19 +581,26 @@ static int  inline generate_json(VALUE encoded,VALUE key,VALUE obj)
       rb_hash_key_to_bson(encoded,key,0x0a);
     } else if (obj == Qfalse) {
       rb_hash_key_to_bson(encoded,key,0x08);
-      size = 5;
-      rb_str_cat(encoded, &size,  4);
+      size = 1;
       rb_str_cat(encoded, &rb_bson_null_byte, 1);
     } else if (obj == Qtrue) {
       rb_hash_key_to_bson(encoded,key,0x08);
-       size = 5;
-      rb_str_cat(encoded, &size,  4);
-
+       size = 1;
       rb_str_cat(encoded, &rb_bson_true_byte,1);
     } else if (klass == rb_cFixnum) {
-       rb_hash_key_to_bson(encoded,key,0x12);
-       size = 8;
-       rb_integer_to_bson_int64(obj,encoded);
+
+       const int64_t v = NUM2INT64(obj);
+       if( v < 0xffffffff)
+       {
+        rb_hash_key_to_bson(encoded,key,0x10);
+        size = 4;
+        rb_integer_to_bson_int32(obj,encoded);
+       }
+       else{
+        rb_hash_key_to_bson(encoded,key,0x12);
+        size = 8;
+        rb_integer_to_bson_int64(obj,encoded);
+       }
     } 
     // else if (klass == rb_cBignum) {
     //     generate_json_bignum(buffer, Vstate, state, obj);
@@ -601,7 +611,17 @@ static int  inline generate_json(VALUE encoded,VALUE key,VALUE obj)
        VALUE ret = rb_float_to_bson(0, NULL, obj);
 
        rb_str_cat(encoded, RSTRING_PTR(ret), 8);
-    } 
+    }
+    else{
+      VALUE temp = rb_funcall(obj,i_to_s,0);
+      Check_Type(temp,T_STRING);
+
+      rb_hash_key_to_bson(encoded,key,0x02);
+      res = rb_string_to_bson(0, NULL, temp);
+      size = RSTRING_LEN(res) ;
+      rb_str_cat(encoded, RSTRING_PTR(res),  size); // lenth + content + \x0 
+
+    }
 
     return size + 2 + RSTRING_LEN(key);
     // else if (rb_respond_to(obj, i_to_bson)) {
